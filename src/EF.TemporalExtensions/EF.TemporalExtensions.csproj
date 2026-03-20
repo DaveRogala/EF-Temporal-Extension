@@ -5,24 +5,24 @@
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
 
-    <!-- NuGet package metadata -->
     <PackageId>EF.TemporalExtensions</PackageId>
     <Version>1.0.0</Version>
     <Authors>DaveRogala</Authors>
-    <Description>Entity Framework Core extension library for working with SQL Server temporal (system-versioned) tables. Provides fluent query helpers, audit trail, diff utilities, and model configuration extensions.</Description>
-    <PackageTags>efcore;entityframework;temporal;systemversioned;audit;history</PackageTags>
+    <Description>
+      Extends EF Core's IsTemporal() fluent API with a HasRetentionPeriod() method,
+      automatically emitting the correct ALTER TABLE … SET (SYSTEM_VERSIONING = ON
+      (HISTORY_RETENTION_PERIOD = …)) SQL in migrations.
+    </Description>
+    <PackageTags>efcore;entityframework;temporal;retention;sqlserver;migrations</PackageTags>
     <RepositoryUrl>https://github.com/DaveRogala/EF-Temporal-Extension</RepositoryUrl>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <Deterministic>true</Deterministic>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.0" />
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.0" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="10.0.0" />
   </ItemGroup>
 
 </Project>

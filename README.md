@@ -3,22 +3,31 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![.NET](https://img.shields.io/badge/.NET-10.0-512BD4)](https://dotnet.microsoft.com)
 
-A .NET 10 class library that provides fluent extension methods for working with **SQL Server system-versioned (temporal) tables** via Entity Framework Core. It wraps EF Core's built-in temporal operators with strongly-typed helpers, adds audit trail utilities, diff support, and model configuration shortcuts.
+Extends the EF Core `IsTemporal()` fluent API with a `HasRetentionPeriod()` method, so you can configure SQL Server temporal table history retention directly in your model — no more manually editing migration files.
+
+```csharp
+entity.ToTable("Orders", schema: "sales",
+    o => o.IsTemporal()
+           .HasRetentionPeriod(6, TemporalPeriodUnit.Month));
+```
+
+The library hooks into EF Core's migration pipeline and automatically emits the required `ALTER TABLE` statement in every migration that creates or alters that table.
 
 ---
 
-## Features
+## The problem
 
-- Fluent wrappers for all five EF Core temporal operators (`AsOf`, `FromTo`, `Between`, `ContainedIn`, `All`)
-- `TemporalPeriod` value type for expressing time ranges cleanly
-- `TemporalSnapshot<T>` — pairs a queried entity with its validity period
-- `TemporalDiff<T>` — detects `Created` / `Modified` / `Deleted` between two instants
-- `GetAuditTrailAsync` — full, chronologically ordered history for a single entity
-- `FindAsOfAsync` / `GetDiffAsync` / `CountVersionsAsync` on `DbContext`
-- Model builder extensions for configuring temporal tables in `OnModelCreating`
-- `ITemporalEntity` marker interface for convention-based bulk configuration
-- Automatic UTC normalisation of all `DateTime` inputs
-- Targets `net10.0`; no additional runtime dependencies beyond EF Core
+EF Core's built-in `IsTemporal()` does not expose a way to set `HISTORY_RETENTION_PERIOD`. To configure retention you currently have to manually add SQL to every migration file:
+
+```sql
+-- hand-written, fragile, easy to forget
+ALTER TABLE [sales].[Orders]
+    SET (SYSTEM_VERSIONING = ON (
+        HISTORY_TABLE = [sales].[OrdersHistory],
+        HISTORY_RETENTION_PERIOD = 6 MONTHS));
+```
+
+This library eliminates that manual step.
 
 ---
 
@@ -28,215 +37,105 @@ A .NET 10 class library that provides fluent extension methods for working with 
 <PackageReference Include="EF.TemporalExtensions" Version="1.0.0" />
 ```
 
-> Requires `Microsoft.EntityFrameworkCore` and `Microsoft.EntityFrameworkCore.Relational` 10.x.
+Requires `Microsoft.EntityFrameworkCore.SqlServer` 10.x.
 
 ---
 
-## Quick start
+## Setup
 
-### 1. Mark entities
-
-Implement `ITemporalEntity` on any entity that maps to a temporal table:
+Register the library's custom SQL generator and annotation provider once when configuring your `DbContext`:
 
 ```csharp
-public class Order : ITemporalEntity
-{
-    public int    Id     { get; set; }
-    public string Status { get; set; } = string.Empty;
-}
+services.AddDbContext<AppDbContext>(options =>
+    options.UseSqlServer(connectionString)
+           .UseTemporalRetentionPeriods());   // <-- add this
 ```
 
-### 2. Configure the model
+---
+
+## Usage
+
+Chain `HasRetentionPeriod` after `IsTemporal()` in `OnModelCreating`:
 
 ```csharp
 protected override void OnModelCreating(ModelBuilder modelBuilder)
 {
-    // Option A — configure all ITemporalEntity types automatically
-    modelBuilder.UseTemporalTablesForTemporalEntities();
-
-    // Option B — configure a single entity with a custom history table
+    // 6 months
     modelBuilder.Entity<Order>()
-                .HasTemporalTable("OrderHistory", schema: "audit");
+        .ToTable("Orders", schema: "sales",
+            o => o.IsTemporal()
+                   .HasRetentionPeriod(6, TemporalPeriodUnit.Month));
 
-    // Option C — customise period column names
-    modelBuilder.Entity<Order>()
-                .HasTemporalTableWithPeriodColumns("ValidFrom", "ValidTo");
+    // 1 year, with an explicit history table name
+    modelBuilder.Entity<Product>()
+        .ToTable("Products",
+            o => o.IsTemporal()
+                   .HasRetentionPeriod(1, TemporalPeriodUnit.Year)
+                   .UseHistoryTable("ProductHistory", "audit"));
+
+    // Explicitly infinite (removes any limit)
+    modelBuilder.Entity<Customer>()
+        .ToTable("Customers",
+            o => o.IsTemporal()
+                   .HasInfiniteRetention());
 }
 ```
 
-### 3. Query temporal data
+### Available units
 
-```csharp
-// All five SQL Server temporal operators:
-var asOf        = ctx.Orders.AsOf(DateTime.UtcNow.AddDays(-7));
-var fromTo      = ctx.Orders.FromTo(start, end);
-var between     = ctx.Orders.Between(start, end);
-var containedIn = ctx.Orders.ContainedIn(start, end);
-var all         = ctx.Orders.All();
-
-// Use a TemporalPeriod instead of raw DateTimes:
-var period = TemporalPeriod.Between(start, end);
-var orders = ctx.Orders.Between(period);
-```
+| `TemporalPeriodUnit` | SQL keyword |
+|----------------------|-------------|
+| `Day`                | `DAYS`      |
+| `Week`               | `WEEKS`     |
+| `Month`              | `MONTHS`    |
+| `Year`               | `YEARS`     |
+| `Infinite`           | `INFINITE`  |
 
 ---
 
-## TemporalPeriod
+## Generated migration SQL
 
-`TemporalPeriod` is an immutable UTC time-range value type that can be passed to any of the query helpers.
+For a `CreateTableOperation` EF Core produces its normal temporal DDL, and this library appends:
 
-```csharp
-var period = new TemporalPeriod(start, end);
-
-// Factory helpers
-var instant = TemporalPeriod.At(DateTime.UtcNow);
-var window  = TemporalPeriod.Starting(DateTime.UtcNow.AddHours(-1), TimeSpan.FromHours(1));
-
-// Range tests
-bool inside    = period.Contains(somePoint);
-bool overlaps  = period.Overlaps(otherPeriod);
-var  intersect = period.Intersect(otherPeriod); // TemporalPeriod?
-
-// Deconstruct
-var (from, to) = period;
+```sql
+ALTER TABLE [sales].[Orders]
+    SET (SYSTEM_VERSIONING = ON (
+        HISTORY_TABLE = [sales].[OrdersHistory],
+        HISTORY_RETENTION_PERIOD = 6 MONTHS));
 ```
+
+If the retention period changes in a later migration, an `AlterTableOperation` triggers the same `ALTER TABLE` with the updated value.
 
 ---
 
-## Audit trail
+## How it works
 
-Retrieve every recorded version of a single entity, ordered chronologically:
+Three components wire together to make this seamless:
 
-```csharp
-IReadOnlyList<TemporalSnapshot<Order>> history = await ctx.GetAuditTrailAsync(
-    keySelector:           o => o.Id,
-    key:                   42,
-    periodStartSelector:   o => o.ValidFrom,
-    periodEndSelector:     o => o.ValidTo,
-    period:                new TemporalPeriod(sixMonthsAgo, DateTime.UtcNow));
+| Component | Role |
+|-----------|------|
+| `TemporalTableBuilderExtensions` | Adds `HasRetentionPeriod` / `HasInfiniteRetention` to `TemporalTableBuilder` via an extension method. Stores the value as an EF Core annotation on the entity type. |
+| `TemporalRetentionAnnotationProvider` | Subclasses `SqlServerMigrationsAnnotationProvider` to ensure the retention annotation is carried from the entity type into `CreateTableOperation` / `AlterTableOperation`. |
+| `TemporalRetentionMigrationsSqlGenerator` | Subclasses `SqlServerMigrationsSqlGenerator` to detect the annotation and append the `ALTER TABLE … HISTORY_RETENTION_PERIOD` statement after the standard temporal DDL. |
 
-foreach (var (order, period) in history)
-{
-    Console.WriteLine($"[{period}] Status = {order.Status}");
-}
-```
+All three are registered via `UseTemporalRetentionPeriods()` using EF Core's `ReplaceService` mechanism — no scaffolding changes are needed.
 
----
-
-## Diff between two points in time
-
-```csharp
-TemporalDiff<Order> diff = await ctx.GetDiffAsync(
-    keySelector: o => o.Id,
-    key:         42,
-    from:        yesterday,
-    to:          DateTime.UtcNow);
-
-Console.WriteLine(diff.ChangeType);   // Created | Modified | Deleted
-Console.WriteLine(diff.Before?.Status);
-Console.WriteLine(diff.After?.Status);
-```
-
----
-
-## Snapshot projection
-
-When querying `TemporalAll()` (or any temporal operator), you can project each row into a `TemporalSnapshot<T>` that carries its validity period alongside the entity:
-
-```csharp
-var snapshots = ctx.Orders
-                   .All()
-                   .Where(o => o.Id == 42)
-                   .WithSnapshot(o => o.ValidFrom, o => o.ValidTo);
-
-foreach (var snap in snapshots)
-{
-    Console.WriteLine($"{snap.Entity.Status} was valid {snap.Period}");
-}
-```
-
----
-
-## History for a specific entity
-
-```csharp
-// All versions within the last year
-var versions = ctx.Orders
-                  .HistoryFor(o => o.Id, 42, period: lastYear);
-
-// Count how many versions existed
-int count = await ctx.CountVersionsAsync(o => o.Id, 42);
-```
-
----
-
-## Pagination
-
-```csharp
-var page = ctx.Orders
-              .All()
-              .OrderBy(o => EF.Property<DateTime>(o, "ValidFrom"))
-              .PagedTemporal(page: 0, pageSize: 25);
-```
-
----
-
-## API reference
-
-### `TemporalQueryExtensions` (on `IQueryable<T>`)
-
-| Method | SQL Server operator |
-|--------|-------------------|
-| `AsOf(DateTime)` | `FOR SYSTEM_TIME AS OF` |
-| `AsOf(TemporalPeriod)` | `FOR SYSTEM_TIME AS OF` (instant period) |
-| `FromTo(DateTime, DateTime)` | `FOR SYSTEM_TIME FROM … TO` |
-| `FromTo(TemporalPeriod)` | `FOR SYSTEM_TIME FROM … TO` |
-| `Between(DateTime, DateTime)` | `FOR SYSTEM_TIME BETWEEN … AND` |
-| `Between(TemporalPeriod)` | `FOR SYSTEM_TIME BETWEEN … AND` |
-| `ContainedIn(DateTime, DateTime)` | `FOR SYSTEM_TIME CONTAINED IN` |
-| `ContainedIn(TemporalPeriod)` | `FOR SYSTEM_TIME CONTAINED IN` |
-| `All()` | `FOR SYSTEM_TIME ALL` |
-| `WithSnapshot(startExpr, endExpr)` | Projects to `TemporalSnapshot<T>` |
-| `HistoryFor(keyExpr, key, period?)` | History for a single key |
-| `GetDiffAsync(keyExpr, key, from, to)` | Async diff between two instants |
-| `PagedTemporal(page, pageSize)` | Offset pagination |
-| `ExistedDuringAsync(keyExpr, key, period)` | Existence check |
-
-### `TemporalDbContextExtensions` (on `DbContext`)
-
-| Method | Description |
-|--------|-------------|
-| `GetAuditTrailAsync(...)` | Full ordered history as `TemporalSnapshot<T>` list |
-| `FindAsOfAsync(keyExpr, key, point)` | Single entity as-of a point |
-| `GetDiffAsync(keyExpr, key, from, to)` | Diff between two points |
-| `CountVersionsAsync(keyExpr, key, period?)` | Count historical versions |
-
-### `TemporalModelBuilderExtensions` (on `ModelBuilder`)
-
-| Method | Description |
-|--------|-------------|
-| `UseTemporalTablesForTemporalEntities()` | Configure all `ITemporalEntity` types |
-| `UseTemporalTablesForAllEntities()` | Configure every entity type |
-
-### `TemporalEntityTypeBuilderExtensions` (on `EntityTypeBuilder<T>`)
-
-| Method | Description |
-|--------|-------------|
-| `HasTemporalTable()` | Default history table name |
-| `HasTemporalTable(name, schema?)` | Custom history table name |
-| `HasTemporalTable(Action<TemporalTableBuilder>)` | Full callback control |
-| `HasTemporalTableWithPeriodColumns(start, end, historyTable?)` | Custom period column names |
+> **Note on reflection.** `TemporalTableBuilder` does not expose its underlying `EntityTypeBuilder` publicly. The extension method accesses the private `_entityTypeBuilder` field via reflection. This field name has been stable across EF Core 8, 9, and 10. If a future EF Core release changes it, an `InvalidOperationException` will surface at startup with a clear message.
 
 ---
 
 ## Requirements
 
 - .NET 10.0
-- EF Core 10.x with SQL Server provider (`Microsoft.EntityFrameworkCore.SqlServer`)
-- SQL Server 2016+ or Azure SQL Database (system-versioned temporal table support)
+- EF Core 10.x (`Microsoft.EntityFrameworkCore.SqlServer`)
+- SQL Server 2016+ or Azure SQL Database with temporal table support
+- `TEMPORAL_HISTORY_RETENTION` must be enabled on the database:
+  ```sql
+  ALTER DATABASE MyDatabase SET TEMPORAL_HISTORY_RETENTION ON;
+  ```
 
 ---
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+[MIT](LICENSE)
