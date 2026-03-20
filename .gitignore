@@ -1,0 +1,22 @@
+## .NET / C# specific
+bin/
+obj/
+*.user
+*.suo
+.vs/
+_ReSharper*/
+*.DotSettings.user
+TestResults/
+*.nupkg
+*.snupkg
+publish/
+
+## Rider
+.idea/
+
+## VS Code
+.vscode/
+
+## OS
+.DS_Store
+Thumbs.db
